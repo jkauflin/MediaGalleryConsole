@@ -81,14 +81,15 @@ using MediaGalleryConsole.Model;
 using ExifLibrary;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Processing;
+using Csv;
+using Microsoft.Azure.Cosmos.Serialization.HybridRow.Schemas;
+using Newtonsoft.Json;
 
 namespace MediaGalleryConsole
 {
     class Program
     {
         private static List<DatePattern> dpList = new List<DatePattern>();
-        private static DateTime nullDate = new DateTime(1800, 1, 1);
-        private static DateTime maxDateTime = new DateTime(9999, 1, 1);
         private static DateTime minDateTime = new DateTime(1800, 1, 1);
         private static string author = "John J Kauflin";
 
@@ -125,7 +126,8 @@ namespace MediaGalleryConsole
 
                 // Call an asynchronous method to start the processing
                 Program p = new Program();
-                await p.ProcessPhotosAsync();
+                //await p.ProcessPhotosAsync();
+                await p.MoveDataAsync();
             }
             catch (CosmosException de)
             {
@@ -140,10 +142,98 @@ namespace MediaGalleryConsole
             {
                 timer.Stop();
                 Console.WriteLine($"END elapsed time = {timer.Elapsed.ToString()}");
-                Console.WriteLine("");
-                Console.WriteLine(">>>>> Don't forget to update Last Run Time");
             }
         }
+
+
+        public async Task MoveDataAsync()
+        {
+            Console.WriteLine($"Moving Album and People data");
+
+            // Create a new instance of the Cosmos Client
+            cosmosClient = new CosmosClient(mediaGalleryDBEndpointUri, mediaGalleryDBPrimaryKey,
+                new CosmosClientOptions()
+                {
+                    ApplicationName = "MediaGalleryConsole"
+                }
+            );
+            database = cosmosClient.GetDatabase(databaseId);
+            container = cosmosClient.GetContainer(databaseId, containerId);
+
+            var csv = File.ReadAllText("C:/Users/johnk/Downloads/FileInfo.csv");
+            int mediaTypeId = 2;
+            DateTime takenDT;
+            int cnt = 0;
+            foreach (var line in CsvReader.ReadFromText(csv))
+            {
+                // Header is handled, each line will contain the actual row data
+                //var firstCell = line[0];
+                //var byName = line["Column name"];
+                
+                if (line["MediaTypeId"] != "2")
+                {
+                    continue;
+                }
+
+                cnt++;
+
+                /*
+"Name","MediaTypeId","CategoryTags","MenuTags","AlbumTags","FullNameLocal","NameAndPath","FilePath","CreateDateTime","LastModified",
+"TakenDateTime","Title","Description","People","ToBeProcessed"
+"_2m20viNfvY","2","7 Something Else","1992-03 Practice",,"D:\Projects\johnkauflin\public_html\home\Media\Videos\7 Something Else\1992-03 Practice\youtube.txt","_2m20viNfvY",,"2021-01-26 09:48:09","2019-12-11 07:15:46",
+                "1992-03-01 00:00:00","1992-03 Practice","Description",,"1"
+"_CHJ3Sbal-s","2","8 Midnight Ramblers","Misc",,"D:\Projects\johnkauflin\public_html\home\Media\Videos\8 Midnight Ramblers\Misc\youtube.txt","2017 The Mortar Shell lives: _CHJ3Sbal-s",,"2021-01-26 09:48:10","2019-01-12 16:40:17","2017-01-01 00:00:00","2017 The Mortar Shell lives","Description",,"1"
+"_J4A3717.JPG","1","5 Bands","Band Parties",,"D:\Projects\johnkauflin\public_html\home\Media\Photos\5 Bands\Band Parties\2007-Present\2017-09-02 Rockfest 15\_J4A3717.JPG","Photos/5 Bands/Band Parties/2007-Present/2017-09-02 Rockfest 15/_J4A3717.JPG","5 Bands/Band Parties/2007-Present/2017-09-02 Rockfest 15/","2022-01-23 17:29:50","2023-01-12 20:49:08","2017-09-02 00:00:00","Title","Description","Allen Seals","0"
+*/
+
+
+                takenDT = DateTime.Parse(line["TakenDateTime"]);
+                Console.WriteLine($"{cnt}, {line["Name"]}, {takenDT}");
+
+
+                // Create a metadata object from the media file information
+                MediaInfo mediaInfo = new MediaInfo
+                {
+                    id = Guid.NewGuid().ToString(),
+                    MediaTypeId = mediaTypeId,
+                    Name = line["Name"],
+                    TakenDateTime = takenDT,
+                    //TakenFileTime = takenDT.ToFileTime(),
+                    TakenFileTime = int.Parse(takenDT.ToString("yyyyMMddHH")),
+                    CategoryTags = line["CategoryTags"],
+                    MenuTags = line["MenuTags"],
+                    AlbumTags = line["AlbumTags"],
+                    Title = line["Title"],
+                    Description = line["Description"],
+                    People = line["People"],
+                    ToBeProcessed = false,
+                    SearchStr = line["CategoryTags"].ToLower() + " " +
+                                line["MenuTags"].ToLower() + " " +
+                                line["Title"].ToLower() + " " +
+                                line["Description"].ToLower() + " " +
+                                line["People"].ToLower()
+                };
+
+                //Console.WriteLine(mediaInfo);
+                try
+                {
+                    await container.CreateItemAsync<MediaInfo>(mediaInfo, new Microsoft.Azure.Cosmos.PartitionKey(mediaInfo.MediaTypeId));
+                }
+                catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
+                {
+                    // Ignore duplicate error, just continue on
+                    //Console.WriteLine($"Conflict with Create on Name (duplicate): {mediaInfo.Name} ");
+                }
+                catch (Exception ex)
+                {
+                    // Log any other exceptions and stop
+                    Console.WriteLine(ex.Message);
+                    throw ex;
+                }
+            }
+
+        }
+
 
         // <ProcessPhotosAsync>
         /// <summary>
@@ -160,7 +250,7 @@ namespace MediaGalleryConsole
             var defaultDate = DateTime.Parse("01/01/1800");
             DateTime takenDT = defaultDate;
             string rootPath = "D:/Projects/johnkauflin/public_html/home/Media/Photos";
-            lastRunDate = DateTime.Parse("04/11/2024 13:05:00");
+            lastRunDate = DateTime.Parse("04/11/2024 14:54:00");
 
             // Create a new instance of the Cosmos Client
             cosmosClient = new CosmosClient(mediaGalleryDBEndpointUri, mediaGalleryDBPrimaryKey,
@@ -169,7 +259,7 @@ namespace MediaGalleryConsole
                     ApplicationName = "MediaGalleryConsole"
                 }
             );
-
+            
             database = cosmosClient.GetDatabase(databaseId);
             container = cosmosClient.GetContainer(databaseId, containerId);
             var photosContainer = new BlobContainerClient(jjkwebStorageConnStr, "photos");
@@ -255,7 +345,7 @@ namespace MediaGalleryConsole
                 //Console.WriteLine(mediaInfo);
                 try
                 {
-                    await container.CreateItemAsync<MediaInfo>(mediaInfo, new PartitionKey(mediaInfo.MediaTypeId));
+                    await container.CreateItemAsync<MediaInfo>(mediaInfo, new Microsoft.Azure.Cosmos.PartitionKey(mediaInfo.MediaTypeId));
                 }
                 catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
                 {
@@ -276,6 +366,9 @@ namespace MediaGalleryConsole
             {
                 Console.WriteLine("No new files found");
             }
+
+            Console.WriteLine("");
+            Console.WriteLine(">>>>> Don't forget to update Last Run Time");
 
         } // public async Task ProcessPhotosAsync()
 
