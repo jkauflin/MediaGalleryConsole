@@ -68,9 +68,10 @@
  *                  console to be the general upload - resize images for
  *                  smaller and thumbnail into blob storage, and update of
  *                  Cosmos DB NoSQL metadata entities.
+ * 2024-04-15 JJK   Moved Album and People data to Cosmos DB entities
+ * 2024-04-17 JJK   Implementing an upload for music albums
  *============================================================================*/
 using System.Diagnostics;
-using System.Collections;
 using Microsoft.Extensions.Configuration;
 using Azure.Storage.Blobs;
 using Microsoft.Azure.Cosmos;
@@ -82,8 +83,8 @@ using ExifLibrary;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Processing;
 using Csv;
-using Microsoft.Azure.Cosmos.Serialization.HybridRow.Schemas;
-using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using System.IO;
 
 namespace MediaGalleryConsole
 {
@@ -126,8 +127,9 @@ namespace MediaGalleryConsole
 
                 // Call an asynchronous method to start the processing
                 Program p = new Program();
+                await p.ProcessMusicAsync();
                 //await p.ProcessPhotosAsync();
-                await p.MoveDataAsync();
+                //await p.MoveDataAsync();
             }
             catch (CosmosException de)
             {
@@ -144,6 +146,142 @@ namespace MediaGalleryConsole
                 Console.WriteLine($"END elapsed time = {timer.Elapsed.ToString()}");
             }
         }
+
+
+        // <ProcessPhotosAsync>
+        /// <summary>
+        /// Entry point to start processing
+        /// </summary>
+        public async Task ProcessMusicAsync()
+        {
+            int mediaTypeId = 3;  // Music
+            FileInfo fi;
+            var defaultDate = DateTime.Parse("01/01/1800");
+            DateTime takenDT = defaultDate;
+            string rootPath = "D:/Projects/johnkauflin/public_html/home/Media/Music";
+            //lastRunDate = DateTime.Parse("01/01/1800 00:00:00");
+            lastRunDate = DateTime.Parse("04/17/2024 00:00:00");
+
+            // Create a new instance of the Cosmos Client
+            cosmosClient = new CosmosClient(mediaGalleryDBEndpointUri, mediaGalleryDBPrimaryKey,
+                new CosmosClientOptions()
+                {
+                    ApplicationName = "MediaGalleryConsole"
+                }
+            );
+
+            database = cosmosClient.GetDatabase(databaseId);
+            container = cosmosClient.GetContainer(databaseId, containerId);
+            var musicContainer = new BlobContainerClient(jjkwebStorageConnStr, "music");
+
+            Console.WriteLine($"Last Run = {lastRunDate.ToString("MM/dd/yyyy HH:mm:ss")}");
+
+            //bool storageOverwrite = true;
+            bool storageOverwrite = false;
+            string band;
+            string album;
+            string storageFilename;
+            string ext;
+            int index = 0;
+            foreach (string filePath in Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories))
+            {
+                fi = new FileInfo(filePath);
+                if (fi.LastWriteTime < lastRunDate)
+                {
+                    continue;
+                }
+
+                ext = fi.Extension.ToLower();
+                if (!ext.Equals(".mp3"))
+                {
+                    continue;
+                }
+
+                index++;
+                /*
+                if (index < 6000)
+                {
+                    continue;
+                }
+                */
+
+
+                // Set a few fields in the image metadata, and get a good taken datetime
+                takenDT = fi.CreationTime;
+                if (takenDT.Year == 1)
+                {
+                    takenDT = defaultDate;
+                }
+
+                // Get the category and menu from the file path
+                var dirParts = fi.FullName.Substring(rootPath.Length + 1).Replace(@"\", @"/").Split('/');
+                band = dirParts[0];     // CategoryTags
+                album = dirParts[1];    // MenuTags
+                storageFilename = band + " " + album + " " + fi.Name;
+                takenDT = getDateFromFilename(fi.FullName);
+
+                Console.WriteLine($"{index}, {band} {album}, {fi.Name}, taken = {takenDT} ");
+
+                // Upload the file to music blob storage
+                var blobClient = musicContainer.GetBlobClient(storageFilename);
+                if (!blobClient.Exists())
+                {
+                    //blobClient.Upload(memoryStream, storageOverwrite);
+                    blobClient.Upload(fi.FullName);
+                }
+
+                // Create a metadata object from the media file information
+                MediaInfo mediaInfo = new MediaInfo
+                {
+                    id = Guid.NewGuid().ToString(),
+                    MediaTypeId = mediaTypeId,
+                    Name = storageFilename,
+                    TakenDateTime = takenDT,
+                    //TakenFileTime = takenDT.ToFileTime(),
+                    TakenFileTime = int.Parse(takenDT.ToString("yyyyMMddHH")),
+                    CategoryTags = band,
+                    MenuTags = album,
+                    AlbumTags = "",
+                    Title = "",
+                    Description = "",
+                    People = "",
+                    ToBeProcessed = false,
+                    SearchStr = storageFilename
+                };
+
+                if (mediaInfo.CategoryTags.Length == 0 && mediaInfo.MenuTags.Length == 0)
+                {
+                    mediaInfo.ToBeProcessed = true;
+                }
+
+                //Console.WriteLine(mediaInfo);
+                try
+                {
+                    await container.CreateItemAsync<MediaInfo>(mediaInfo, new Microsoft.Azure.Cosmos.PartitionKey(mediaInfo.MediaTypeId));
+                }
+                catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
+                {
+                    // Ignore duplicate error, just continue on
+                    //Console.WriteLine($"Conflict with Create on Name (duplicate): {mediaInfo.Name} ");
+                }
+                catch (Exception ex)
+                {
+                    // Log any other exceptions and stop
+                    Console.WriteLine(ex.Message);
+                    throw ex;
+                }
+
+            } // File loop
+
+            if (index == 0)
+            {
+                Console.WriteLine("No new files found");
+            }
+
+            Console.WriteLine("");
+            Console.WriteLine(">>>>> Don't forget to update Last Run Time");
+
+        } // public async Task ProcessMusicAsync()
 
 
         public async Task MoveDataAsync()
@@ -176,20 +314,8 @@ namespace MediaGalleryConsole
                 }
 
                 cnt++;
-
-                /*
-"Name","MediaTypeId","CategoryTags","MenuTags","AlbumTags","FullNameLocal","NameAndPath","FilePath","CreateDateTime","LastModified",
-"TakenDateTime","Title","Description","People","ToBeProcessed"
-"_2m20viNfvY","2","7 Something Else","1992-03 Practice",,"D:\Projects\johnkauflin\public_html\home\Media\Videos\7 Something Else\1992-03 Practice\youtube.txt","_2m20viNfvY",,"2021-01-26 09:48:09","2019-12-11 07:15:46",
-                "1992-03-01 00:00:00","1992-03 Practice","Description",,"1"
-"_CHJ3Sbal-s","2","8 Midnight Ramblers","Misc",,"D:\Projects\johnkauflin\public_html\home\Media\Videos\8 Midnight Ramblers\Misc\youtube.txt","2017 The Mortar Shell lives: _CHJ3Sbal-s",,"2021-01-26 09:48:10","2019-01-12 16:40:17","2017-01-01 00:00:00","2017 The Mortar Shell lives","Description",,"1"
-"_J4A3717.JPG","1","5 Bands","Band Parties",,"D:\Projects\johnkauflin\public_html\home\Media\Photos\5 Bands\Band Parties\2007-Present\2017-09-02 Rockfest 15\_J4A3717.JPG","Photos/5 Bands/Band Parties/2007-Present/2017-09-02 Rockfest 15/_J4A3717.JPG","5 Bands/Band Parties/2007-Present/2017-09-02 Rockfest 15/","2022-01-23 17:29:50","2023-01-12 20:49:08","2017-09-02 00:00:00","Title","Description","Allen Seals","0"
-*/
-
-
                 takenDT = DateTime.Parse(line["TakenDateTime"]);
                 Console.WriteLine($"{cnt}, {line["Name"]}, {takenDT}");
-
 
                 // Create a metadata object from the media file information
                 MediaInfo mediaInfo = new MediaInfo
