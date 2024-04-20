@@ -178,6 +178,7 @@ namespace MediaGalleryConsole
 
             //bool storageOverwrite = true;
             bool storageOverwrite = false;
+            string idStr;
             string band;
             string album;
             string storageFilename;
@@ -230,10 +231,25 @@ namespace MediaGalleryConsole
                     blobClient.Upload(fi.FullName);
                 }
 
+                // Query the container and get the ID if the Name already exists
+                idStr = Guid.NewGuid().ToString();
+                var queryText = $"SELECT * FROM c WHERE c.Name = \"{storageFilename}\" ";
+                var feed = container.GetItemQueryIterator<MediaInfo>(queryText);
+
+                while (feed.HasMoreResults)
+                {
+                    var response = await feed.ReadNextAsync();
+                    foreach (var item in response)
+                    {
+                        //Console.WriteLine($"Found item:\t{item.Name}");
+                        idStr = item.id;
+                    }
+                }
+
                 // Create a metadata object from the media file information
                 MediaInfo mediaInfo = new MediaInfo
                 {
-                    id = Guid.NewGuid().ToString(),
+                    id = idStr,
                     MediaTypeId = mediaTypeId,
                     Name = storageFilename,
                     TakenDateTime = takenDT,
@@ -242,7 +258,7 @@ namespace MediaGalleryConsole
                     CategoryTags = band,
                     MenuTags = album,
                     AlbumTags = "",
-                    Title = "",
+                    Title = fi.Name,
                     Description = "",
                     People = "",
                     ToBeProcessed = false,
@@ -257,7 +273,8 @@ namespace MediaGalleryConsole
                 //Console.WriteLine(mediaInfo);
                 try
                 {
-                    await container.CreateItemAsync<MediaInfo>(mediaInfo, new Microsoft.Azure.Cosmos.PartitionKey(mediaInfo.MediaTypeId));
+                    //await container.CreateItemAsync<MediaInfo>(mediaInfo, new Microsoft.Azure.Cosmos.PartitionKey(mediaInfo.MediaTypeId));
+                    await container.UpsertItemAsync<MediaInfo>(mediaInfo, new Microsoft.Azure.Cosmos.PartitionKey(mediaInfo.MediaTypeId));
                 }
                 catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
                 {
