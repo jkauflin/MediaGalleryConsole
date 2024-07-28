@@ -85,6 +85,7 @@ using SixLabors.ImageSharp.Processing;
 using Csv;
 using Newtonsoft.Json.Linq;
 using System.IO;
+using Azure;
 
 namespace MediaGalleryConsole
 {
@@ -95,8 +96,8 @@ namespace MediaGalleryConsole
         private static string author = "John J Kauflin";
 
         private static string? jjkwebStorageConnStr;
-        private static string? mediaGalleryDBEndpointUri;
-        private static string? mediaGalleryDBPrimaryKey;
+        private static string? jjkWebNoSqlUri;
+        private static string? jjkWebNoSqlKey;
         private static readonly Stopwatch timer = new Stopwatch();
         private static DateTime lastRunDate;
         //private static ArrayList fileList = new ArrayList();
@@ -104,7 +105,7 @@ namespace MediaGalleryConsole
         private CosmosClient cosmosClient;
         private Database database;
         private Container container;
-        private string databaseId = "MediaGalleryDB";
+        private string databaseId = "JJKWebDB";
         private string containerId = "MediaInfo";
 
         // <Main>
@@ -120,16 +121,17 @@ namespace MediaGalleryConsole
                     .AddUserSecrets<Program>()
                     .Build();
                 jjkwebStorageConnStr = config["jjkwebStorageConnStr"];
-                mediaGalleryDBEndpointUri = config["MediaGalleryDBEndpointUri"];
-                mediaGalleryDBPrimaryKey = config["MediaGalleryDBPrimaryKey"];
+                jjkWebNoSqlUri = config["JJKWebNoSqlUri"];
+                jjkWebNoSqlKey = config["JJKWebNoSqlKey"];
 
                 loadDatePatterns();
 
                 // Call an asynchronous method to start the processing
                 Program p = new Program();
-                await p.ProcessMusicAsync();
-                //await p.ProcessPhotosAsync();
+                //await p.ProcessMusicAsync();
                 //await p.MoveDataAsync();
+                //await p.PurgeMetricsAsync();
+                await p.ProcessPhotosAsync();
             }
             catch (CosmosException de)
             {
@@ -148,6 +150,176 @@ namespace MediaGalleryConsole
         }
 
 
+        public async Task PurgeMetricsAsync()
+        {
+            Console.WriteLine($"Purging MetricPoint data older than 3 days ");
+
+            var jjkCosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
+                new CosmosClientOptions()
+                {
+                    ApplicationName = "MediaGalleryConsole"
+                }
+            );
+
+            var databaseNEW = jjkCosmosClient.GetDatabase("JJKWebDB");
+            var containerNEW = jjkCosmosClient.GetContainer("JJKWebDB", "MetricPoint");
+
+            DateTime currDateTime = DateTime.Now;
+
+            try
+            {
+                //metricPointContainer.CreateItemAsync<MetricPoint>(metricPoint, new PartitionKey(metricPoint.PointDay));
+
+                string maxYearMonthDay = currDateTime.AddDays(-3).ToString("yyyyMMdd");
+                int cnt = 0;
+                // currDateTime - 3 days
+                //int dayVal = int.Parse(metricData.metricDateTime.ToString("yyyyMMdd"));  // 
+                var queryText = $"SELECT * FROM c WHERE c.PointDay < {maxYearMonthDay} ";
+                var feed = containerNEW.GetItemQueryIterator<MetricPoint>(queryText);
+                while (feed.HasMoreResults)
+                {
+                    var response = await feed.ReadNextAsync();
+                    foreach (var item in response)
+                    {
+                        cnt++;
+                        // execute a delete item on each document
+                        Console.WriteLine($"{cnt} {item.id} {item.PointDateTime} ");
+                        await containerNEW.DeleteItemAsync<MetricPoint>(item.id, new PartitionKey(item.PointDay));
+                    }
+                }
+
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+                throw ex;
+            }
+
+        } // PurgeMetricsAsync
+
+        /*
+        public async Task MoveDataAsync()
+        {
+            Console.WriteLine($"Moving data to new jjkwebnosql ");
+
+            // Create a new instance of the Cosmos Client
+            cosmosClient = new CosmosClient(mediaGalleryDBEndpointUri, mediaGalleryDBPrimaryKey,
+                new CosmosClientOptions()
+                {
+                    ApplicationName = "MediaGalleryConsole"
+                }
+            );
+            database = cosmosClient.GetDatabase(databaseId);
+
+            var jjkCosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
+                new CosmosClientOptions()
+                {
+                    ApplicationName = "MediaGalleryConsole"
+                }
+            );
+
+            var databaseNEW = jjkCosmosClient.GetDatabase("JJKWebDB");
+
+            container = cosmosClient.GetContainer(databaseId, "MetricYearTotal");
+            var containerNEW = jjkCosmosClient.GetContainer("JJKWebDB", "MetricYearTotal");
+
+            // Get the existing document from Cosmos DB
+            //var queryText = $"SELECT * FROM c WHERE c.PointDay > 20240723 ";
+            var queryText = $"SELECT * FROM c ";
+            var feed = container.GetItemQueryIterator<MetricYearTotal>(queryText);
+            int cnt = 0;
+            while (feed.HasMoreResults)
+            {
+                var response = await feed.ReadNextAsync();
+                foreach (var metricYearTotal in response)
+                {
+                    cnt++;
+
+                    try
+                    {
+                        await containerNEW.CreateItemAsync<MetricYearTotal>(metricYearTotal, new Microsoft.Azure.Cosmos.PartitionKey(metricYearTotal.TotalBucket));
+                        Console.WriteLine($"{cnt} Created Item ");
+                    }
+                    catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
+                    {
+                        // Ignore duplicate error, just continue on
+                        //Console.WriteLine($"Conflict with Create on Name (duplicate): {mediaInfo.Name} ");
+                    }
+                    catch (Exception ex)
+                    {
+                        // Log any other exceptions and stop
+                        Console.WriteLine(ex.Message);
+                        throw ex;
+                    }
+
+                }
+            }
+
+
+            var csv = File.ReadAllText("C:/Users/johnk/Downloads/FileInfo.csv");
+            int mediaTypeId = 2;
+            DateTime takenDT;
+            int cnt = 0;
+            foreach (var line in CsvReader.ReadFromText(csv))
+            {
+                // Header is handled, each line will contain the actual row data
+                //var firstCell = line[0];
+                //var byName = line["Column name"];
+
+                if (line["MediaTypeId"] != "2")
+                {
+                    continue;
+                }
+
+                cnt++;
+                takenDT = DateTime.Parse(line["TakenDateTime"]);
+                Console.WriteLine($"{cnt}, {line["Name"]}, {takenDT}");
+
+                // Create a metadata object from the media file information
+                MediaInfo mediaInfo = new MediaInfo
+                {
+                    id = Guid.NewGuid().ToString(),
+                    MediaTypeId = mediaTypeId,
+                    Name = line["Name"],
+                    TakenDateTime = takenDT,
+                    //TakenFileTime = takenDT.ToFileTime(),
+                    TakenFileTime = int.Parse(takenDT.ToString("yyyyMMddHH")),
+                    CategoryTags = line["CategoryTags"],
+                    MenuTags = line["MenuTags"],
+                    AlbumTags = line["AlbumTags"],
+                    Title = line["Title"],
+                    Description = line["Description"],
+                    People = line["People"],
+                    ToBeProcessed = false,
+                    SearchStr = line["CategoryTags"].ToLower() + " " +
+                                line["MenuTags"].ToLower() + " " +
+                                line["Title"].ToLower() + " " +
+                                line["Description"].ToLower() + " " +
+                                line["People"].ToLower()
+                };
+
+                //Console.WriteLine(mediaInfo);
+                try
+                {
+                    await container.CreateItemAsync<MediaInfo>(mediaInfo, new Microsoft.Azure.Cosmos.PartitionKey(mediaInfo.MediaTypeId));
+                }
+                catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
+                {
+                    // Ignore duplicate error, just continue on
+                    //Console.WriteLine($"Conflict with Create on Name (duplicate): {mediaInfo.Name} ");
+                }
+                catch (Exception ex)
+                {
+                    // Log any other exceptions and stop
+                    Console.WriteLine(ex.Message);
+                    throw ex;
+                }
+            }
+
+        } // public async Task MoveDataAsync()
+        */
+
+
         // <ProcessPhotosAsync>
         /// <summary>
         /// Entry point to start processing
@@ -160,10 +332,10 @@ namespace MediaGalleryConsole
             DateTime takenDT = defaultDate;
             string rootPath = "D:/Projects/johnkauflin/public_html/home/Media/Music";
             //lastRunDate = DateTime.Parse("01/01/1800 00:00:00");
-            lastRunDate = DateTime.Parse("04/17/2024 00:00:00");
+            lastRunDate = DateTime.Parse("05/29/2024 10:40:00");
 
             // Create a new instance of the Cosmos Client
-            cosmosClient = new CosmosClient(mediaGalleryDBEndpointUri, mediaGalleryDBPrimaryKey,
+            cosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
                 new CosmosClientOptions()
                 {
                     ApplicationName = "MediaGalleryConsole"
@@ -205,7 +377,6 @@ namespace MediaGalleryConsole
                     continue;
                 }
                 */
-
 
                 // Set a few fields in the image metadata, and get a good taken datetime
                 takenDT = fi.CreationTime;
@@ -265,6 +436,7 @@ namespace MediaGalleryConsole
                     SearchStr = storageFilename
                 };
 
+
                 if (mediaInfo.CategoryTags.Length == 0 && mediaInfo.MenuTags.Length == 0)
                 {
                     mediaInfo.ToBeProcessed = true;
@@ -301,82 +473,6 @@ namespace MediaGalleryConsole
         } // public async Task ProcessMusicAsync()
 
 
-        public async Task MoveDataAsync()
-        {
-            Console.WriteLine($"Moving Album and People data");
-
-            // Create a new instance of the Cosmos Client
-            cosmosClient = new CosmosClient(mediaGalleryDBEndpointUri, mediaGalleryDBPrimaryKey,
-                new CosmosClientOptions()
-                {
-                    ApplicationName = "MediaGalleryConsole"
-                }
-            );
-            database = cosmosClient.GetDatabase(databaseId);
-            container = cosmosClient.GetContainer(databaseId, containerId);
-
-            var csv = File.ReadAllText("C:/Users/johnk/Downloads/FileInfo.csv");
-            int mediaTypeId = 2;
-            DateTime takenDT;
-            int cnt = 0;
-            foreach (var line in CsvReader.ReadFromText(csv))
-            {
-                // Header is handled, each line will contain the actual row data
-                //var firstCell = line[0];
-                //var byName = line["Column name"];
-                
-                if (line["MediaTypeId"] != "2")
-                {
-                    continue;
-                }
-
-                cnt++;
-                takenDT = DateTime.Parse(line["TakenDateTime"]);
-                Console.WriteLine($"{cnt}, {line["Name"]}, {takenDT}");
-
-                // Create a metadata object from the media file information
-                MediaInfo mediaInfo = new MediaInfo
-                {
-                    id = Guid.NewGuid().ToString(),
-                    MediaTypeId = mediaTypeId,
-                    Name = line["Name"],
-                    TakenDateTime = takenDT,
-                    //TakenFileTime = takenDT.ToFileTime(),
-                    TakenFileTime = int.Parse(takenDT.ToString("yyyyMMddHH")),
-                    CategoryTags = line["CategoryTags"],
-                    MenuTags = line["MenuTags"],
-                    AlbumTags = line["AlbumTags"],
-                    Title = line["Title"],
-                    Description = line["Description"],
-                    People = line["People"],
-                    ToBeProcessed = false,
-                    SearchStr = line["CategoryTags"].ToLower() + " " +
-                                line["MenuTags"].ToLower() + " " +
-                                line["Title"].ToLower() + " " +
-                                line["Description"].ToLower() + " " +
-                                line["People"].ToLower()
-                };
-
-                //Console.WriteLine(mediaInfo);
-                try
-                {
-                    await container.CreateItemAsync<MediaInfo>(mediaInfo, new Microsoft.Azure.Cosmos.PartitionKey(mediaInfo.MediaTypeId));
-                }
-                catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
-                {
-                    // Ignore duplicate error, just continue on
-                    //Console.WriteLine($"Conflict with Create on Name (duplicate): {mediaInfo.Name} ");
-                }
-                catch (Exception ex)
-                {
-                    // Log any other exceptions and stop
-                    Console.WriteLine(ex.Message);
-                    throw ex;
-                }
-            }
-
-        }
-
 
         // <ProcessPhotosAsync>
         /// <summary>
@@ -393,10 +489,12 @@ namespace MediaGalleryConsole
             var defaultDate = DateTime.Parse("01/01/1800");
             DateTime takenDT = defaultDate;
             string rootPath = "D:/Projects/johnkauflin/public_html/home/Media/Photos";
-            lastRunDate = DateTime.Parse("04/11/2024 14:54:00");
+            //lastRunDate = DateTime.Parse("05/02/2024 13:54:00");
+            lastRunDate = DateTime.Parse("07/28/2024 00:40:00");
 
             // Create a new instance of the Cosmos Client
-            cosmosClient = new CosmosClient(mediaGalleryDBEndpointUri, mediaGalleryDBPrimaryKey,
+
+            cosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
                 new CosmosClientOptions()
                 {
                     ApplicationName = "MediaGalleryConsole"
