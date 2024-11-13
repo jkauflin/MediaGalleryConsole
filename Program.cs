@@ -70,6 +70,11 @@
  *                  Cosmos DB NoSQL metadata entities.
  * 2024-04-15 JJK   Moved Album and People data to Cosmos DB entities
  * 2024-04-17 JJK   Implementing an upload for music albums
+ * 2024-10-22 JJK   Implemented override to use filename for date+time
+ *                  instead of the file metadata
+ * 2024-10-28 JJK   Modified to use minutes and seconds from iOS filename
+ *                  for taken value, and updated Azure Cosmos DB update for
+ *                  existing names to fetch and delete the old first
  *============================================================================*/
 using System.Diagnostics;
 using Microsoft.Extensions.Configuration;
@@ -149,6 +154,167 @@ namespace MediaGalleryConsole
             }
         }
 
+        // <ProcessPhotosAsync>
+        /// <summary>
+        /// Entry point to start processing
+        /// </summary>
+        public async Task ProcessPhotosAsync()
+        {
+            int mediaTypeId = 1;    // Photos
+            //int mediaTypeId = 2;  // Videos
+            //int mediaTypeId = 3;  // Music
+            FileInfo fi;
+            string category;
+            string menu;
+            var defaultDate = DateTime.Parse("01/01/1800");
+            DateTime takenDT = defaultDate;
+            string rootPath = "D:/Projects/johnkauflin/public_html/home/Media/Photos";
+            lastRunDate = DateTime.Parse("11/13/2024 00:00:00");
+
+            // Create a new instance of the Cosmos Client
+
+            cosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
+                new CosmosClientOptions()
+                {
+                    ApplicationName = "MediaGalleryConsole"
+                }
+            );
+
+            database = cosmosClient.GetDatabase(databaseId);
+            container = cosmosClient.GetContainer(databaseId, containerId);
+            var photosContainer = new BlobContainerClient(jjkwebStorageConnStr, "photos");
+            var thumbsContainer = new BlobContainerClient(jjkwebStorageConnStr, "thumbs");
+
+            Console.WriteLine($"Last Run = {lastRunDate.ToString("MM/dd/yyyy HH:mm:ss")}");
+
+            //bool storageOverwrite = true;
+            bool storageOverwrite = false;
+            string ext;
+            int index = 0;
+            foreach (string filePath in Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories))
+            {
+                fi = new FileInfo(filePath);
+                //if (fi.LastWriteTime < lastRunDate)
+                if (fi.CreationTime < lastRunDate)
+                {
+                        continue;
+                }
+
+                // Skip files in this directory
+                if (fi.FullName.Contains(".picasaoriginals") || fi.Name.Equals("1987-01 001.jpg"))
+                {
+                    continue;
+                }
+                /*
+                if (!fi.Name.StartsWith("20241012_170906790"))
+                {
+                    continue;
+                }
+                */
+
+                index++;
+                /*
+                if (index < 6000)
+                {
+                    continue;
+                }
+                */
+
+                ext = fi.Extension.ToLower();
+                if (!ext.Equals(".jpeg") && !ext.Equals(".jpg") && !ext.Equals(".png") && !ext.Equals(".gif"))
+                {
+                    continue;
+                }
+
+                // Set a few fields in the image metadata, and get a good taken datetime
+                takenDT = setPhotoMetadata(fi);
+                if (takenDT.Year == 1)
+                {
+                    takenDT = defaultDate;
+                }
+
+                // Get the category and menu from the file path
+                var dirParts = fi.FullName.Substring(rootPath.Length + 1).Replace(@"\", @"/").Split('/');
+                category = dirParts[0];
+                menu = dirParts[1];
+
+                Console.WriteLine($"{index}, {fi.Name}, taken = {takenDT}, {category}, {menu} ");
+
+                // Load the image, create resized images and upload to the blob storage containers
+                using SixLabors.ImageSharp.Image image = SixLabors.ImageSharp.Image.Load(fi.FullName);
+                await UploadImgToStorageAsync(photosContainer, fi, image, 2000, storageOverwrite);
+                await UploadImgToStorageAsync(thumbsContainer, fi, image, 110, storageOverwrite);
+
+                // Create a metadata object from the media file information
+                MediaInfo mediaInfo = new MediaInfo
+                {
+                    id = Guid.NewGuid().ToString(),
+                    MediaTypeId = mediaTypeId,
+                    Name = fi.Name,
+                    TakenDateTime = takenDT,
+                    //TakenFileTime = takenDT.ToFileTime(),
+                    TakenFileTime = int.Parse(takenDT.ToString("yyyyMMddHH")),
+                    CategoryTags = category,
+                    MenuTags = menu,
+                    AlbumTags = "",
+                    Title = "",
+                    Description = "",
+                    People = "",
+                    ToBeProcessed = false,
+                    SearchStr = fi.Name.ToLower()
+                };
+
+                if (mediaInfo.CategoryTags.Length == 0 && mediaInfo.MenuTags.Length == 0)
+                {
+                    mediaInfo.ToBeProcessed = true;
+                }
+
+                //Console.WriteLine(mediaInfo);
+                try
+                {
+                    await container.CreateItemAsync<MediaInfo>(mediaInfo, new PartitionKey(mediaInfo.MediaTypeId));
+                }
+                catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
+                {
+                    // Ignore duplicate error, just continue on
+                    /*
+                    Console.WriteLine($"Conflict with Create on Name (duplicate): {mediaInfo.Name} ");
+
+                    // Delete all previous documents with the filename and insert a brand new document with updated values
+                    // c.Name = "20241012_170906790_iOS.jpg"
+                    var queryText = $"SELECT * FROM c WHERE c.Name = \"{mediaInfo.Name}\" ";
+                    var feed = container.GetItemQueryIterator<MediaInfo>(queryText);
+                    while (feed.HasMoreResults)
+                    {
+                        var response = await feed.ReadNextAsync();
+                        foreach (var item in response)
+                        {
+                            //metricData.kWh_bucket_YEAR = float.Parse(item.TotalValue);
+                            container.DeleteItemAsync<MediaInfo>(item.id, new PartitionKey(mediaInfo.MediaTypeId));
+                        }
+                    }
+                    await container.CreateItemAsync<MediaInfo>(mediaInfo, new PartitionKey(mediaInfo.MediaTypeId));
+                    */
+                }
+                catch (Exception ex)
+                {
+                    // Log any other exceptions and stop
+                    Console.WriteLine(ex.Message);
+                    throw ex;
+                }
+
+            } // File loop
+
+            if (index == 0)
+            {
+                Console.WriteLine("No new files found");
+            }
+
+            Console.WriteLine("");
+            Console.WriteLine(">>>>> Don't forget to update Last Run Time");
+
+        } // public async Task ProcessPhotosAsync()
+
 
         public async Task PurgeMetricsAsync()
         {
@@ -197,53 +363,44 @@ namespace MediaGalleryConsole
 
         } // PurgeMetricsAsync
 
-        /*
         public async Task MoveDataAsync()
         {
-            Console.WriteLine($"Moving data to new jjkwebnosql ");
+            //Console.WriteLine($"Moving data to new jjkwebnosql ");
+            Console.WriteLine($"Moving data from MediaInfo to MediaInfoTEMP (with a Unique Key on /MediaTypeId,/Name ");
 
-            // Create a new instance of the Cosmos Client
-            cosmosClient = new CosmosClient(mediaGalleryDBEndpointUri, mediaGalleryDBPrimaryKey,
+            var cosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
                 new CosmosClientOptions()
                 {
                     ApplicationName = "MediaGalleryConsole"
                 }
             );
+
             database = cosmosClient.GetDatabase(databaseId);
+            container = cosmosClient.GetContainer(databaseId, "MediaInfoTEMP");
 
-            var jjkCosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
-                new CosmosClientOptions()
-                {
-                    ApplicationName = "MediaGalleryConsole"
-                }
-            );
-
-            var databaseNEW = jjkCosmosClient.GetDatabase("JJKWebDB");
-
-            container = cosmosClient.GetContainer(databaseId, "MetricYearTotal");
-            var containerNEW = jjkCosmosClient.GetContainer("JJKWebDB", "MetricYearTotal");
+            var containerNEW = cosmosClient.GetContainer(databaseId, containerId);
 
             // Get the existing document from Cosmos DB
             //var queryText = $"SELECT * FROM c WHERE c.PointDay > 20240723 ";
             var queryText = $"SELECT * FROM c ";
-            var feed = container.GetItemQueryIterator<MetricYearTotal>(queryText);
+            var feed = container.GetItemQueryIterator<MediaInfo>(queryText);
             int cnt = 0;
             while (feed.HasMoreResults)
             {
                 var response = await feed.ReadNextAsync();
-                foreach (var metricYearTotal in response)
+                foreach (var item in response)
                 {
                     cnt++;
 
                     try
                     {
-                        await containerNEW.CreateItemAsync<MetricYearTotal>(metricYearTotal, new Microsoft.Azure.Cosmos.PartitionKey(metricYearTotal.TotalBucket));
+                        await containerNEW.CreateItemAsync<MediaInfo>(item, new PartitionKey(item.MediaTypeId));
                         Console.WriteLine($"{cnt} Created Item ");
                     }
                     catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
                     {
                         // Ignore duplicate error, just continue on
-                        //Console.WriteLine($"Conflict with Create on Name (duplicate): {mediaInfo.Name} ");
+                        Console.WriteLine($"Conflict with Create on Name (duplicate): {item.Name} ");
                     }
                     catch (Exception ex)
                     {
@@ -255,69 +412,7 @@ namespace MediaGalleryConsole
                 }
             }
 
-
-            var csv = File.ReadAllText("C:/Users/johnk/Downloads/FileInfo.csv");
-            int mediaTypeId = 2;
-            DateTime takenDT;
-            int cnt = 0;
-            foreach (var line in CsvReader.ReadFromText(csv))
-            {
-                // Header is handled, each line will contain the actual row data
-                //var firstCell = line[0];
-                //var byName = line["Column name"];
-
-                if (line["MediaTypeId"] != "2")
-                {
-                    continue;
-                }
-
-                cnt++;
-                takenDT = DateTime.Parse(line["TakenDateTime"]);
-                Console.WriteLine($"{cnt}, {line["Name"]}, {takenDT}");
-
-                // Create a metadata object from the media file information
-                MediaInfo mediaInfo = new MediaInfo
-                {
-                    id = Guid.NewGuid().ToString(),
-                    MediaTypeId = mediaTypeId,
-                    Name = line["Name"],
-                    TakenDateTime = takenDT,
-                    //TakenFileTime = takenDT.ToFileTime(),
-                    TakenFileTime = int.Parse(takenDT.ToString("yyyyMMddHH")),
-                    CategoryTags = line["CategoryTags"],
-                    MenuTags = line["MenuTags"],
-                    AlbumTags = line["AlbumTags"],
-                    Title = line["Title"],
-                    Description = line["Description"],
-                    People = line["People"],
-                    ToBeProcessed = false,
-                    SearchStr = line["CategoryTags"].ToLower() + " " +
-                                line["MenuTags"].ToLower() + " " +
-                                line["Title"].ToLower() + " " +
-                                line["Description"].ToLower() + " " +
-                                line["People"].ToLower()
-                };
-
-                //Console.WriteLine(mediaInfo);
-                try
-                {
-                    await container.CreateItemAsync<MediaInfo>(mediaInfo, new Microsoft.Azure.Cosmos.PartitionKey(mediaInfo.MediaTypeId));
-                }
-                catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
-                {
-                    // Ignore duplicate error, just continue on
-                    //Console.WriteLine($"Conflict with Create on Name (duplicate): {mediaInfo.Name} ");
-                }
-                catch (Exception ex)
-                {
-                    // Log any other exceptions and stop
-                    Console.WriteLine(ex.Message);
-                    throw ex;
-                }
-            }
-
         } // public async Task MoveDataAsync()
-        */
 
 
         // <ProcessPhotosAsync>
@@ -474,144 +569,6 @@ namespace MediaGalleryConsole
 
 
 
-        // <ProcessPhotosAsync>
-        /// <summary>
-        /// Entry point to start processing
-        /// </summary>
-        public async Task ProcessPhotosAsync()
-        {
-            int mediaTypeId = 1;    // Photos
-            //int mediaTypeId = 2;  // Videos
-            //int mediaTypeId = 3;  // Music
-            FileInfo fi;
-            string category;
-            string menu;
-            var defaultDate = DateTime.Parse("01/01/1800");
-            DateTime takenDT = defaultDate;
-            string rootPath = "D:/Projects/johnkauflin/public_html/home/Media/Photos";
-            //lastRunDate = DateTime.Parse("05/02/2024 13:54:00");
-            lastRunDate = DateTime.Parse("07/28/2024 00:40:00");
-
-            // Create a new instance of the Cosmos Client
-
-            cosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
-                new CosmosClientOptions()
-                {
-                    ApplicationName = "MediaGalleryConsole"
-                }
-            );
-            
-            database = cosmosClient.GetDatabase(databaseId);
-            container = cosmosClient.GetContainer(databaseId, containerId);
-            var photosContainer = new BlobContainerClient(jjkwebStorageConnStr, "photos");
-            var thumbsContainer = new BlobContainerClient(jjkwebStorageConnStr, "thumbs");
-
-            Console.WriteLine($"Last Run = {lastRunDate.ToString("MM/dd/yyyy HH:mm:ss")}");
-
-            //bool storageOverwrite = true;
-            bool storageOverwrite = false;
-            string ext;
-            int index = 0;
-            foreach (string filePath in Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories))
-            {
-                fi = new FileInfo(filePath);
-                if (fi.LastWriteTime < lastRunDate)
-                {
-                    continue;
-                }
-
-                // Skip files in this directory
-                if (fi.FullName.Contains(".picasaoriginals") || fi.Name.Equals("1987-01 001.jpg"))
-                {
-                    continue;
-                }
-
-                index++;
-                /*
-                if (index < 6000)
-                {
-                    continue;
-                }
-                */
-
-                ext = fi.Extension.ToLower();
-                if (!ext.Equals(".jpeg") && !ext.Equals(".jpg") && !ext.Equals(".png") && !ext.Equals(".gif"))
-                {
-                    continue;
-                }
-
-                // Set a few fields in the image metadata, and get a good taken datetime
-                takenDT = setPhotoMetadata(fi);
-                if (takenDT.Year == 1)
-                {
-                    takenDT = defaultDate;
-                }
-
-                // Get the category and menu from the file path
-                var dirParts = fi.FullName.Substring(rootPath.Length + 1).Replace(@"\", @"/").Split('/');
-                category = dirParts[0];
-                menu = dirParts[1];
-
-                Console.WriteLine($"{index}, {fi.Name}, taken = {takenDT}, {category}, {menu} ");
-
-                // Load the image, create resized images and upload to the blob storage containers
-                using SixLabors.ImageSharp.Image image = SixLabors.ImageSharp.Image.Load(fi.FullName);
-                await UploadImgToStorageAsync(photosContainer, fi, image, 2000, storageOverwrite);
-                await UploadImgToStorageAsync(thumbsContainer, fi, image, 110, storageOverwrite);
-
-                // Create a metadata object from the media file information
-                MediaInfo mediaInfo = new MediaInfo
-                {
-                    id = Guid.NewGuid().ToString(),
-                    MediaTypeId = mediaTypeId,
-                    Name = fi.Name,
-                    TakenDateTime = takenDT,
-                    //TakenFileTime = takenDT.ToFileTime(),
-                    TakenFileTime = int.Parse(takenDT.ToString("yyyyMMddHH")),
-                    CategoryTags = category,
-                    MenuTags = menu,
-                    AlbumTags = "",
-                    Title = "",
-                    Description = "",
-                    People = "",
-                    ToBeProcessed = false,
-                    SearchStr = fi.Name.ToLower()
-                };
-
-                if (mediaInfo.CategoryTags.Length == 0 && mediaInfo.MenuTags.Length == 0)
-                {
-                    mediaInfo.ToBeProcessed = true;
-                }
-
-                //Console.WriteLine(mediaInfo);
-                try
-                {
-                    await container.CreateItemAsync<MediaInfo>(mediaInfo, new Microsoft.Azure.Cosmos.PartitionKey(mediaInfo.MediaTypeId));
-                }
-                catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
-                {
-                    // Ignore duplicate error, just continue on
-                    //Console.WriteLine($"Conflict with Create on Name (duplicate): {mediaInfo.Name} ");
-                }
-                catch (Exception ex)
-                {
-                    // Log any other exceptions and stop
-                    Console.WriteLine(ex.Message);
-                    throw ex;
-                }
-
-
-             } // File loop
-
-            if (index == 0)
-            {
-                Console.WriteLine("No new files found");
-            }
-
-            Console.WriteLine("");
-            Console.WriteLine(">>>>> Don't forget to update Last Run Time");
-
-        } // public async Task ProcessPhotosAsync()
 
         private async Task UploadImgToStorageAsync(BlobContainerClient containerClient, FileInfo fi, SixLabors.ImageSharp.Image image, int desiredImgSize, bool storageOverwrite)
         {
@@ -771,10 +728,18 @@ namespace MediaGalleryConsole
                         dateFormat = "yyyy-MM";
                     }
 
+                    // Majority case - backup from iPhone iOS photos
                     if (dateFormat.Equals("yyyyMMdd_iOS"))
                     {
-                        dateStr = dateStr.Substring(0, 8);
-                        dateFormat = "yyyyMMdd";
+                        /*
+                        20241017_090331090_iOS
+                        yyyyMMdd_HHmmssfff_iOS
+                        */
+                        // 2024-10-28 JJK - Add minutes and seconds to the iOS parse (based on how the file name is created on download)
+                        //dateStr = dateStr.Substring(0, 8);
+                        dateStr = dateStr.Substring(0, 15);
+                        //dateFormat = "yyyyMMdd";
+                        dateFormat = "yyyyMMdd_HHmmss";
                     }
 
                     if (dateFormat.Equals("IMG_yyyyMMdd"))
@@ -831,7 +796,10 @@ namespace MediaGalleryConsole
                         dateFormat = "yyyy";
                     }
 
-                    if (DateTime.TryParseExact(dateStr, dateFormat, null, System.Globalization.DateTimeStyles.None, out outDateTime))
+                    //if (DateTime.TryParseExact(dateStr, dateFormat, null, System.Globalization.DateTimeStyles.None, out outDateTime))
+                    // Modified to assume that the datetime in the filename format (from iPhone iOS) is a UTC datetime - this will make sure the datetime gets
+                    // converted to local datetime for an accurate datetime of when the photo was taken
+                    if (DateTime.TryParseExact(dateStr, dateFormat, null, System.Globalization.DateTimeStyles.AssumeUniversal, out outDateTime))
                     {
                         //log($"{fileName}, date: {dateStr}, format: {dateFormat}, DateTime: {outDateTime}");
                     }
@@ -860,9 +828,13 @@ namespace MediaGalleryConsole
                 var exifArtist = file.Properties.Get<ExifAscii>(ExifTag.Artist);
                 var exifCopyright = file.Properties.Get<ExifAscii>(ExifTag.Copyright);
 
+                // Always the best option to get a nice taken datetime from the picture metadata
                 var exifDateTimeOriginal = file.Properties.Get<ExifDateTime>(ExifTag.DateTimeOriginal);
 
+                // Try to get the Date+Time taken from the filename (this will be the majority case from the iPhone iOS backup)
                 taken = getDateFromFilename(fi.FullName);
+
+                // Good philosophy to use the internal exif datetime if there - that gives the best taken datetime (as opposed to the file datetime)
 
                 if (exifDateTimeOriginal == null)
                 {
@@ -872,13 +844,15 @@ namespace MediaGalleryConsole
                 {
                     // If the Date from the filename is less than the Original DateTime, and it's more than 24 hours different,
                     // then set the Original to the earlier value
-                    if (exifDateTimeOriginal.Value.CompareTo(taken) > 0 && exifDateTimeOriginal.Value.Subtract(taken).TotalHours.CompareTo(24) > 0)
+                    // 2024-10-28 JJK - Just make it a compare with earlist value (exif or file)
+                    // if (exifDateTimeOriginal.Value.CompareTo(taken) > 0 && exifDateTimeOriginal.Value.Subtract(taken).TotalHours.CompareTo(24) > 0)
+                    if (exifDateTimeOriginal.Value.CompareTo(taken) > 0)
                     {
-                        file.Properties.Set(ExifTag.DateTimeOriginal, taken);
+                            file.Properties.Set(ExifTag.DateTimeOriginal, taken);
                     }
                     else
                     {
-                        // If it's a good value, set the taken to the earlier date
+                        // If the exif is a good value, set the taken to the earlier date (from photo metadata)
                         if (exifDateTimeOriginal.Value.CompareTo(minDateTime) > 0)
                         {
                             taken = exifDateTimeOriginal.Value;
