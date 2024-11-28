@@ -70,11 +70,15 @@
  *                  Cosmos DB NoSQL metadata entities.
  * 2024-04-15 JJK   Moved Album and People data to Cosmos DB entities
  * 2024-04-17 JJK   Implementing an upload for music albums
+ * 
+ *                  Move to new DB (West to East)
+ * 
  * 2024-10-22 JJK   Implemented override to use filename for date+time
  *                  instead of the file metadata
  * 2024-10-28 JJK   Modified to use minutes and seconds from iOS filename
  *                  for taken value, and updated Azure Cosmos DB update for
  *                  existing names to fetch and delete the old first
+ * 2024-11-27 JJK   Working on moving data from JJKWebDB to jjkdb1 (AGAIN!!!)
  *============================================================================*/
 using System.Diagnostics;
 using Microsoft.Extensions.Configuration;
@@ -103,13 +107,15 @@ namespace MediaGalleryConsole
         private static string? jjkwebStorageConnStr;
         private static string? jjkWebNoSqlUri;
         private static string? jjkWebNoSqlKey;
+        private static string? jjkdb1Uri;
+        private static string? jjkdb1Key;
         private static readonly Stopwatch timer = new Stopwatch();
         private static DateTime lastRunDate;
         //private static ArrayList fileList = new ArrayList();
 
-        private CosmosClient cosmosClient;
-        private Database database;
-        private Container container;
+        private CosmosClient? cosmosClient;
+        private Database? database;
+        private Container? container;
         private string databaseId = "JJKWebDB";
         private string containerId = "MediaInfo";
 
@@ -128,15 +134,17 @@ namespace MediaGalleryConsole
                 jjkwebStorageConnStr = config["jjkwebStorageConnStr"];
                 jjkWebNoSqlUri = config["JJKWebNoSqlUri"];
                 jjkWebNoSqlKey = config["JJKWebNoSqlKey"];
+                jjkdb1Uri = config["jjkdb1Uri"];
+                jjkdb1Key = config["jjkdb1Key"];
 
                 loadDatePatterns();
 
                 // Call an asynchronous method to start the processing
                 Program p = new Program();
                 //await p.ProcessMusicAsync();
-                //await p.MoveDataAsync();
+                await p.MoveDataAsync();
                 //await p.PurgeMetricsAsync();
-                await p.ProcessPhotosAsync();
+                //await p.ProcessPhotosAsync();
             }
             catch (CosmosException de)
             {
@@ -169,7 +177,7 @@ namespace MediaGalleryConsole
             var defaultDate = DateTime.Parse("01/01/1800");
             DateTime takenDT = defaultDate;
             string rootPath = "D:/Projects/johnkauflin/public_html/home/Media/Photos";
-            lastRunDate = DateTime.Parse("11/13/2024 00:00:00");
+            lastRunDate = DateTime.Parse("11/19/2024 00:00:00");
 
             // Create a new instance of the Cosmos Client
 
@@ -300,7 +308,7 @@ namespace MediaGalleryConsole
                 {
                     // Log any other exceptions and stop
                     Console.WriteLine(ex.Message);
-                    throw ex;
+                    throw;
                 }
 
             } // File loop
@@ -358,32 +366,58 @@ namespace MediaGalleryConsole
             catch (Exception ex)
             {
                 Console.WriteLine(ex.Message);
-                throw ex;
+                throw;
             }
 
         } // PurgeMetricsAsync
 
         public async Task MoveDataAsync()
         {
-            //Console.WriteLine($"Moving data to new jjkwebnosql ");
-            Console.WriteLine($"Moving data from MediaInfo to MediaInfoTEMP (with a Unique Key on /MediaTypeId,/Name ");
+            Console.WriteLine($"Moving data from JJKWebDB to jjkdb1 ");
+            //Console.WriteLine($">>> Moving Container MediaInfo (with a Unique Key on /MediaTypeId,/Name) ");
 
-            var cosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
+            cosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
+                new CosmosClientOptions()
+                {
+                    ApplicationName = "MediaGalleryConsole"
+                }
+            );
+            
+            var cosmosClient2 = new CosmosClient(jjkdb1Uri, jjkdb1Key,
                 new CosmosClientOptions()
                 {
                     ApplicationName = "MediaGalleryConsole"
                 }
             );
 
+            //containerId = "MediaInfo";
+            //containerId = "MediaAlbum";
+            //containerId = "MediaPeople";
+            //containerId = "MetricPoint";
+            //containerId = "MetricTotal";
+            containerId = "MetricYearTotal";
             database = cosmosClient.GetDatabase(databaseId);
-            container = cosmosClient.GetContainer(databaseId, "MediaInfoTEMP");
+            container = cosmosClient.GetContainer(databaseId, containerId);
 
-            var containerNEW = cosmosClient.GetContainer(databaseId, containerId);
+            string databaseId2 = "jjkdb1";
+            //string containerId2 = "MediaInfo";
+            //string containerId2 = "MediaAlbum";
+            //string containerId2 = "MediaPeople";
+            //string containerId2 = "MetricPoint";
+            //string containerId2 = "MetricTotal";
+            string containerId2 = "MetricYearTotal";
+            var database2 = cosmosClient2.GetDatabase(databaseId2);
+            var container2 = cosmosClient2.GetContainer(databaseId2, containerId2);
 
             // Get the existing document from Cosmos DB
-            //var queryText = $"SELECT * FROM c WHERE c.PointDay > 20240723 ";
+            //var queryText = $"SELECT * FROM c WHERE c.PointDay > 20241125 ";
             var queryText = $"SELECT * FROM c ";
-            var feed = container.GetItemQueryIterator<MediaInfo>(queryText);
+            //var feed = container.GetItemQueryIterator<MediaInfo>(queryText);
+            //var feed = container.GetItemQueryIterator<MediaAlbum>(queryText);
+            //var feed = container.GetItemQueryIterator<MediaPeople>(queryText);
+            //var feed = container.GetItemQueryIterator<MetricPoint>(queryText);
+            //var feed = container.GetItemQueryIterator<MetricTotal>(queryText);
+            var feed = container.GetItemQueryIterator<MetricYearTotal>(queryText);
             int cnt = 0;
             while (feed.HasMoreResults)
             {
@@ -391,22 +425,30 @@ namespace MediaGalleryConsole
                 foreach (var item in response)
                 {
                     cnt++;
-
                     try
                     {
-                        await containerNEW.CreateItemAsync<MediaInfo>(item, new PartitionKey(item.MediaTypeId));
-                        Console.WriteLine($"{cnt} Created Item ");
+                        //await container2.CreateItemAsync<MediaInfo>(item, new PartitionKey(item.MediaTypeId));
+                        //await container2.CreateItemAsync<MediaAlbum>(item, new PartitionKey(item.MediaAlbumId));
+                        //await container2.CreateItemAsync<MediaPeople>(item, new PartitionKey(item.MediaPeopleId));
+                        //await container2.CreateItemAsync<MetricPoint>(item, new PartitionKey(item.PointDay));
+                        //await container2.CreateItemAsync<MetricTotal>(item, new PartitionKey(item.TotalBucket));
+                        await container2.CreateItemAsync<MetricYearTotal>(item, new PartitionKey(item.TotalBucket));
+                        //Console.WriteLine($"{cnt} Created Item: {item.Name}");
+                        //Console.WriteLine($"{cnt} Created Item: {item.AlbumName}");
+                        //Console.WriteLine($"{cnt} Created Item: {item.PeopleName}");
+                        //Console.WriteLine($"{cnt} Created Item: {item.PointDayTime}");
+                        Console.WriteLine($"{cnt} Created Item: {item.TotalBucket}");
                     }
                     catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
                     {
                         // Ignore duplicate error, just continue on
-                        Console.WriteLine($"Conflict with Create on Name (duplicate): {item.Name} ");
+                        Console.WriteLine($"{1} Ignore duplicate: {item.id} ");
                     }
                     catch (Exception ex)
                     {
                         // Log any other exceptions and stop
-                        Console.WriteLine(ex.Message);
-                        throw ex;
+                        Console.WriteLine(ex.Message,ex.StackTrace);
+                        throw;
                     }
 
                 }
@@ -443,8 +485,6 @@ namespace MediaGalleryConsole
 
             Console.WriteLine($"Last Run = {lastRunDate.ToString("MM/dd/yyyy HH:mm:ss")}");
 
-            //bool storageOverwrite = true;
-            bool storageOverwrite = false;
             string idStr;
             string band;
             string album;
@@ -508,7 +548,7 @@ namespace MediaGalleryConsole
                     foreach (var item in response)
                     {
                         //Console.WriteLine($"Found item:\t{item.Name}");
-                        idStr = item.id;
+                        idStr = item.id ?? "";
                     }
                 }
 
@@ -552,7 +592,7 @@ namespace MediaGalleryConsole
                 {
                     // Log any other exceptions and stop
                     Console.WriteLine(ex.Message);
-                    throw ex;
+                    throw;
                 }
 
             } // File loop
@@ -570,14 +610,19 @@ namespace MediaGalleryConsole
 
 
 
-        private async Task UploadImgToStorageAsync(BlobContainerClient containerClient, FileInfo fi, SixLabors.ImageSharp.Image image, int desiredImgSize, bool storageOverwrite)
+        private Task UploadImgToStorageAsync(BlobContainerClient containerClient, FileInfo fi, SixLabors.ImageSharp.Image image, int desiredImgSize, bool storageOverwrite)
         {
             var blobClient = containerClient.GetBlobClient(fi.Name);
             if (blobClient.Exists() && !storageOverwrite)
             {
-                // Files already exist (and we don't want to overwrite)
-                return;
+                return Task.CompletedTask;
             }
+
+            if (image is null)
+            {
+                return Task.CompletedTask;
+            }
+
 
             // If you pass 0 as any of the values for width and height dimensions then ImageSharp will
             // automatically determine the correct opposite dimensions size to preserve the original aspect ratio.
@@ -616,11 +661,9 @@ namespace MediaGalleryConsole
             image.Save(memoryStream, image.Metadata.DecodedImageFormat);
             memoryStream.Position = 0;
             blobClient.Upload(memoryStream, storageOverwrite);
-
-            // This is how to save it to a file instead of a stream
-            //var outPath = "C:/Users/johnk/Downloads/smaller/" + fi.Name;
-            //image.Save(outPath);
+            return Task.CompletedTask;
         }
+
         // </UploadImgToStorageAsync>
 
         private static void loadDatePatterns()
@@ -628,71 +671,71 @@ namespace MediaGalleryConsole
             // Load the patterns to use for RegEx and DateTime Parse
             DatePattern datePattern;
 
-            datePattern = new DatePattern();
-            datePattern.regex = new Regex(@"(19|20)\d{2}-((0[1-9])|(1[012]))_(19|20)\d{2}((0[1-9])|(1[012]))((0[1-9]|[12]\d)|3[01])");
-            datePattern.dateParseFormat = "yyyy-MM_yyyyMMdd";
+            datePattern = new DatePattern(
+                new Regex(@"(19|20)\d{2}-((0[1-9])|(1[012]))_(19|20)\d{2}((0[1-9])|(1[012]))((0[1-9]|[12]\d)|3[01])"),
+                "yyyy-MM_yyyyMMdd");
             dpList.Add(datePattern);
 
-            datePattern = new DatePattern();
-            datePattern.regex = new Regex(@"IMG_(19|20)\d{2}((0[1-9])|(1[012]))((0[1-9]|[12]\d)|3[01])");
-            datePattern.dateParseFormat = "IMG_yyyyMMdd";
+            datePattern = new DatePattern(
+                new Regex(@"IMG_(19|20)\d{2}((0[1-9])|(1[012]))((0[1-9]|[12]\d)|3[01])"),
+                "IMG_yyyyMMdd");
             dpList.Add(datePattern);
 
-            datePattern = new DatePattern();
-            datePattern.regex = new Regex(@"(19|20)\d{2}((0[1-9])|(1[012]))((0[1-9]|[12]\d)|3[01])_\d{9}_iOS");
-            datePattern.dateParseFormat = "yyyyMMdd_iOS";
+            datePattern = new DatePattern(
+                new Regex(@"(19|20)\d{2}((0[1-9])|(1[012]))((0[1-9]|[12]\d)|3[01])_\d{9}_iOS"),
+                "yyyyMMdd_iOS");
             dpList.Add(datePattern);
 
-            datePattern = new DatePattern();
-            datePattern.regex = new Regex(@"(19|20)\d{2}((0[1-9])|(1[012]))((0[1-9]|[12]\d)|3[01])");
-            datePattern.dateParseFormat = "yyyyMMdd";
+            datePattern = new DatePattern(
+                new Regex(@"(19|20)\d{2}((0[1-9])|(1[012]))((0[1-9]|[12]\d)|3[01])"),
+                "yyyyMMdd");
             dpList.Add(datePattern);
             // \d{4} to (19|20)\d{2}
             //+		fi	{D:\Photos\1 John J Kauflin\2016-to-2022\2018\01 Winter\FB_IMG_1520381172965.jpg}	System.IO.FileInfo
 
-            datePattern = new DatePattern();
-            datePattern.regex = new Regex(@"(19|20)\d{2}-((0[1-9])|(1[012]))-((0[1-9]|[12]\d)|3[01])");
-            datePattern.dateParseFormat = "yyyy-MM-dd";
+            datePattern = new DatePattern(
+                new Regex(@"(19|20)\d{2}-((0[1-9])|(1[012]))-((0[1-9]|[12]\d)|3[01])"),
+                "yyyy-MM-dd");
             dpList.Add(datePattern);
 
-            datePattern = new DatePattern();
-            datePattern.regex = new Regex(@"(19|20)\d{2}_((0[1-9])|(1[012]))_((0[1-9]|[12]\d)|3[01])");
-            datePattern.dateParseFormat = "yyyy_MM_dd";
+            datePattern = new DatePattern(
+                new Regex(@"(19|20)\d{2}_((0[1-9])|(1[012]))_((0[1-9]|[12]\d)|3[01])"),
+                "yyyy_MM_dd");
             dpList.Add(datePattern);
 
-            datePattern = new DatePattern();
-            datePattern.regex = new Regex(@"(19|20)\d{2}-((0[1-9])|(1[012]))");
-            datePattern.dateParseFormat = "yyyy-MM";
+            datePattern = new DatePattern(
+                new Regex(@"(19|20)\d{2}-((0[1-9])|(1[012]))"),
+                "yyyy-MM");
             dpList.Add(datePattern);
 
-            datePattern = new DatePattern();
-            datePattern.regex = new Regex(@"(19|20)\d{2}_((0[1-9])|(1[012]))");
-            datePattern.dateParseFormat = "yyyy_MM";
+            datePattern = new DatePattern(
+                new Regex(@"(19|20)\d{2}_((0[1-9])|(1[012]))"),
+                "yyyy_MM");
             dpList.Add(datePattern);
 
-            datePattern = new DatePattern();
-            datePattern.regex = new Regex(@"(19|20)\d{2}((0[1-9])|(1[012]))");
-            datePattern.dateParseFormat = "yyyyMM";
+            datePattern = new DatePattern(
+                new Regex(@"(19|20)\d{2}((0[1-9])|(1[012]))"),
+                "yyyyMM");
             dpList.Add(datePattern);
 
-            datePattern = new DatePattern();
-            datePattern.regex = new Regex(@"\\(19|20)\d{2}(\-|\ )");
-            datePattern.dateParseFormat = "yyyy";
+            datePattern = new DatePattern(
+                new Regex(@"\\(19|20)\d{2}(\-|\ )"),
+                "yyyy");
             dpList.Add(datePattern);
 
-            datePattern = new DatePattern();
-            datePattern.regex = new Regex(@"(\(|\\)(19|20)\d{2}(\)|\\)");
-            datePattern.dateParseFormat = "yyyy";
+            datePattern = new DatePattern(
+                new Regex(@"(\(|\\)(19|20)\d{2}(\)|\\)"),
+                "yyyy");
             dpList.Add(datePattern);
 
-            datePattern = new DatePattern();
-            datePattern.regex = new Regex(@"(19|20)\d{2} ");
-            datePattern.dateParseFormat = "yyyy ";
+            datePattern = new DatePattern(
+                new Regex(@"(19|20)\d{2} "),
+                "yyyy ");
             dpList.Add(datePattern);
 
-            datePattern = new DatePattern();
-            datePattern.regex = new Regex(@" (19|20)\d{2}");
-            datePattern.dateParseFormat = " yyyy";
+            datePattern = new DatePattern(
+                new Regex(@" (19|20)\d{2}"),
+                " yyyy");
             dpList.Add(datePattern);
         }
 
@@ -711,6 +754,12 @@ namespace MediaGalleryConsole
             bool found = false;
             int index = 0;
             // Loop through the defined RegEx patterns for date, find matches in the filename, and parse to get DateTime
+
+            if (dpList is null)
+            {
+                return outDateTime;
+            }
+
             while (index < dpList.Count && !found)
             {
                 matches = dpList[index].regex.Matches(fileName);
@@ -719,7 +768,7 @@ namespace MediaGalleryConsole
                     found = true;
                     // If there are multiple matches, just take the last one
                     dateStr = matches[matches.Count - 1].Value;
-                    dateFormat = dpList[index].dateParseFormat;
+                    dateFormat = dpList[index].dateParseFormat ?? "";
 
                     // For this combined case, get the year-month from the start
                     if (dateFormat.Equals("yyyy-MM_yyyyMMdd"))
