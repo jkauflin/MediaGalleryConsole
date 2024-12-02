@@ -1,5 +1,6 @@
 ﻿using Newtonsoft.Json;
 
+
 namespace MediaGalleryConsole.Model
 {
     public class MetricPoint

@@ -79,6 +79,7 @@
  *                  for taken value, and updated Azure Cosmos DB update for
  *                  existing names to fetch and delete the old first
  * 2024-11-27 JJK   Working on moving data from JJKWebDB to jjkdb1 (AGAIN!!!)
+ * 2024-12-02 JJK   Back to regular picture update function
  *============================================================================*/
 using System.Diagnostics;
 using Microsoft.Extensions.Configuration;
@@ -105,8 +106,8 @@ namespace MediaGalleryConsole
         private static string author = "John J Kauflin";
 
         private static string? jjkwebStorageConnStr;
-        private static string? jjkWebNoSqlUri;
-        private static string? jjkWebNoSqlKey;
+        //private static string? jjkWebNoSqlUri;
+        //private static string? jjkWebNoSqlKey;
         private static string? jjkdb1Uri;
         private static string? jjkdb1Key;
         private static readonly Stopwatch timer = new Stopwatch();
@@ -116,7 +117,8 @@ namespace MediaGalleryConsole
         private CosmosClient? cosmosClient;
         private Database? database;
         private Container? container;
-        private string databaseId = "JJKWebDB";
+        //private string databaseId = "JJKWebDB";
+        private string databaseId = "jjkdb1";
         private string containerId = "MediaInfo";
 
         // <Main>
@@ -132,8 +134,8 @@ namespace MediaGalleryConsole
                     .AddUserSecrets<Program>()
                     .Build();
                 jjkwebStorageConnStr = config["jjkwebStorageConnStr"];
-                jjkWebNoSqlUri = config["JJKWebNoSqlUri"];
-                jjkWebNoSqlKey = config["JJKWebNoSqlKey"];
+                //jjkWebNoSqlUri = config["JJKWebNoSqlUri"];
+                //jjkWebNoSqlKey = config["JJKWebNoSqlKey"];
                 jjkdb1Uri = config["jjkdb1Uri"];
                 jjkdb1Key = config["jjkdb1Key"];
 
@@ -142,9 +144,9 @@ namespace MediaGalleryConsole
                 // Call an asynchronous method to start the processing
                 Program p = new Program();
                 //await p.ProcessMusicAsync();
-                await p.MoveDataAsync();
+                //await p.MoveDataAsync();
                 //await p.PurgeMetricsAsync();
-                //await p.ProcessPhotosAsync();
+                await p.ProcessPhotosAsync();
             }
             catch (CosmosException de)
             {
@@ -177,11 +179,10 @@ namespace MediaGalleryConsole
             var defaultDate = DateTime.Parse("01/01/1800");
             DateTime takenDT = defaultDate;
             string rootPath = "D:/Projects/johnkauflin/public_html/home/Media/Photos";
-            lastRunDate = DateTime.Parse("11/19/2024 00:00:00");
+            lastRunDate = DateTime.Parse("12/02/2024 00:00:00");
 
             // Create a new instance of the Cosmos Client
-
-            cosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
+            cosmosClient = new CosmosClient(jjkdb1Uri, jjkdb1Key,
                 new CosmosClientOptions()
                 {
                     ApplicationName = "MediaGalleryConsole"
@@ -328,7 +329,7 @@ namespace MediaGalleryConsole
         {
             Console.WriteLine($"Purging MetricPoint data older than 3 days ");
 
-            var jjkCosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
+            var jjkCosmosClient = new CosmosClient(jjkdb1Uri, jjkdb1Key,
                 new CosmosClientOptions()
                 {
                     ApplicationName = "MediaGalleryConsole"
@@ -376,7 +377,8 @@ namespace MediaGalleryConsole
             Console.WriteLine($"Moving data from JJKWebDB to jjkdb1 ");
             //Console.WriteLine($">>> Moving Container MediaInfo (with a Unique Key on /MediaTypeId,/Name) ");
 
-            cosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
+            //cosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
+            cosmosClient = new CosmosClient(jjkdb1Uri, jjkdb1Key,
                 new CosmosClientOptions()
                 {
                     ApplicationName = "MediaGalleryConsole"
@@ -472,7 +474,7 @@ namespace MediaGalleryConsole
             lastRunDate = DateTime.Parse("05/29/2024 10:40:00");
 
             // Create a new instance of the Cosmos Client
-            cosmosClient = new CosmosClient(jjkWebNoSqlUri, jjkWebNoSqlKey,
+            cosmosClient = new CosmosClient(jjkdb1Uri, jjkdb1Key,
                 new CosmosClientOptions()
                 {
                     ApplicationName = "MediaGalleryConsole"
