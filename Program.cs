@@ -80,6 +80,10 @@
  *                  existing names to fetch and delete the old first
  * 2024-11-27 JJK   Working on moving data from JJKWebDB to jjkdb1 (AGAIN!!!)
  * 2024-12-02 JJK   Back to regular picture update function
+ * 2024-12-16 JJK   Working on processing the GRHA Docs and Photos
+ * 2025-01-05 JJK   Added UpdateBlobProperties to fix the content type of
+ *                  docs to application/pdf (so they open in a new tab)
+ * 2025-01-07 JJK   Updated the photo file upload to set the content type
  *============================================================================*/
 using System.Diagnostics;
 using Microsoft.Extensions.Configuration;
@@ -96,6 +100,9 @@ using Csv;
 using Newtonsoft.Json.Linq;
 using System.IO;
 using Azure;
+using Azure.Storage.Blobs.Models;
+using System;
+using static System.Net.Mime.MediaTypeNames;
 
 namespace MediaGalleryConsole
 {
@@ -106,10 +113,11 @@ namespace MediaGalleryConsole
         private static string author = "John J Kauflin";
 
         private static string? jjkwebStorageConnStr;
-        //private static string? jjkWebNoSqlUri;
-        //private static string? jjkWebNoSqlKey;
         private static string? jjkdb1Uri;
         private static string? jjkdb1Key;
+        private static string? grhawebStorageConnStr;
+        private static string? grhadbUri;
+        private static string? grhadbKey;
         private static readonly Stopwatch timer = new Stopwatch();
         private static DateTime lastRunDate;
         //private static ArrayList fileList = new ArrayList();
@@ -134,10 +142,12 @@ namespace MediaGalleryConsole
                     .AddUserSecrets<Program>()
                     .Build();
                 jjkwebStorageConnStr = config["jjkwebStorageConnStr"];
-                //jjkWebNoSqlUri = config["JJKWebNoSqlUri"];
-                //jjkWebNoSqlKey = config["JJKWebNoSqlKey"];
                 jjkdb1Uri = config["jjkdb1Uri"];
                 jjkdb1Key = config["jjkdb1Key"];
+
+                grhawebStorageConnStr = config["grhawebStorageConnStr"];
+                grhadbUri = config["grhadbUri"];
+                grhadbKey = config["grhadbKey"];
 
                 loadDatePatterns();
 
@@ -146,6 +156,8 @@ namespace MediaGalleryConsole
                 //await p.ProcessMusicAsync();
                 //await p.MoveDataAsync();
                 //await p.PurgeMetricsAsync();
+                //await p.ProcessGrhaDocs();
+                //await p.UpdateBlobProperties();
                 await p.ProcessPhotosAsync();
             }
             catch (CosmosException de)
@@ -164,6 +176,7 @@ namespace MediaGalleryConsole
             }
         }
 
+
         // <ProcessPhotosAsync>
         /// <summary>
         /// Entry point to start processing
@@ -178,8 +191,8 @@ namespace MediaGalleryConsole
             string menu;
             var defaultDate = DateTime.Parse("01/01/1800");
             DateTime takenDT = defaultDate;
-            string rootPath = "D:/Projects/johnkauflin/public_html/home/Media/Photos";
-            lastRunDate = DateTime.Parse("12/02/2024 00:00:00");
+            string rootPath = "D:/jjkMedia/Photos";
+            lastRunDate = DateTime.Parse("01/08/2025 00:00:00");
 
             // Create a new instance of the Cosmos Client
             cosmosClient = new CosmosClient(jjkdb1Uri, jjkdb1Key,
@@ -324,6 +337,305 @@ namespace MediaGalleryConsole
 
         } // public async Task ProcessPhotosAsync()
 
+
+        public async Task UpdateBlobProperties()
+        {
+            int mediaTypeId = 1;    // Photos
+            //int mediaTypeId = 2;  // Videos
+            //int mediaTypeId = 3;  // Music
+            //int mediaTypeId = 4;    // Docs
+            FileInfo fi;
+            string category;
+            string menu;
+            var defaultDate = DateTime.Parse("01/01/1800");
+            DateTime takenDT = defaultDate;
+            string rootPath = "D:/Projects/grha-dayton/public_html/Media/Docs";
+            lastRunDate = DateTime.Parse("01/01/1800 00:00:00");
+
+            // Create a new instance of the Cosmos Client
+            cosmosClient = new CosmosClient(grhadbUri, grhadbKey,
+                new CosmosClientOptions()
+                {
+                    ApplicationName = "MediaGalleryConsole"
+                }
+            );
+
+            databaseId = "hoadb";
+            containerId = "MediaInfoDoc";
+            database = cosmosClient.GetDatabase(databaseId);
+            container = cosmosClient.GetContainer(databaseId, containerId);
+
+            var docsBlobContainer = new BlobContainerClient(grhawebStorageConnStr, "docs");
+
+            //bool storageOverwrite = true;
+            bool storageOverwrite = false;
+            string ext;
+            int index = 0;
+            var blobHttpHeaders = new BlobHttpHeaders
+            {
+                ContentType = "application/pdf"
+            };
+
+
+            //int dayVal = int.Parse(metricData.metricDateTime.ToString("yyyyMMdd"));
+            var queryText = $"SELECT * FROM c WHERE c.MediaTypeId = 4 ";
+            var mediaInfoDocs = container.GetItemQueryIterator<MediaInfoDoc>(queryText);
+            BlobClient blobClient = null;
+            while (mediaInfoDocs.HasMoreResults)
+            {
+                var response = await mediaInfoDocs.ReadNextAsync();
+                foreach (var item in response)
+                {
+                    index++;
+                    blobClient = docsBlobContainer.GetBlobClient(item.Name);
+                    Console.WriteLine($"{index}, updating type for {item.Name} ");
+                    await blobClient.SetHttpHeadersAsync(blobHttpHeaders);
+                }
+            }
+
+            /*
+                // Create a metadata object from the media file information
+                MediaInfoDoc mediaInfoDoc = new MediaInfoDoc
+                {
+                    id = Guid.NewGuid().ToString(),
+                    MediaTypeId = mediaTypeId,
+                    Name = newName,
+                    MediaDateTime = takenDT,
+                    MediaDateTimeVal = int.Parse(takenDT.ToString("yyyyMMddHH")),
+                    CategoryTags = category,
+                    MenuTags = menu,
+                    AlbumTags = "",
+                    Title = "",
+                    Description = "",
+                    People = "",
+                    ToBeProcessed = false,
+                    SearchStr = fi.Name.ToLower()
+                };
+
+                if (mediaInfoDoc.CategoryTags.Length == 0 && mediaInfoDoc.MenuTags.Length == 0)
+                {
+                    mediaInfoDoc.ToBeProcessed = true;
+                }
+
+                //Console.WriteLine(mediaInfo);
+                try
+                {
+                    await container.CreateItemAsync<MediaInfoDoc>(mediaInfoDoc, new PartitionKey(mediaInfoDoc.MediaTypeId));
+                }
+                catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
+                {
+                    // Ignore duplicate error, just continue on
+                }
+                catch (Exception ex)
+                {
+                    // Log any other exceptions and stop
+                    Console.WriteLine(ex.Message);
+                    throw;
+                }
+
+            } // File loop
+            */
+
+            if (index == 0)
+            {
+                Console.WriteLine("No new files found");
+            }
+
+            Console.WriteLine("");
+        }
+
+
+        public async Task ProcessGrhaDocs()
+        {
+            int mediaTypeId = 1;    // Photos
+            //int mediaTypeId = 2;  // Videos
+            //int mediaTypeId = 3;  // Music
+            //int mediaTypeId = 4;    // Docs
+            FileInfo fi;
+            string category;
+            string menu;
+            var defaultDate = DateTime.Parse("01/01/1800");
+            DateTime takenDT = defaultDate;
+            string rootPath = "D:/Projects/grha-dayton/public_html/Media/Photos";
+            lastRunDate = DateTime.Parse("01/01/1800 00:00:00");
+
+            // Create a new instance of the Cosmos Client
+            cosmosClient = new CosmosClient(grhadbUri, grhadbKey,
+                new CosmosClientOptions()
+                {
+                    ApplicationName = "MediaGalleryConsole"
+                }
+            );
+
+
+            databaseId = "hoadb";
+            containerId = "MediaInfoDoc";
+
+            database = cosmosClient.GetDatabase(databaseId);
+            container = cosmosClient.GetContainer(databaseId, containerId);
+
+            //var docsContainer = new BlobContainerClient(grhawebStorageConnStr, "docs");
+            var photosContainer = new BlobContainerClient(grhawebStorageConnStr, "photos");
+            var thumbsContainer = new BlobContainerClient(grhawebStorageConnStr, "thumbs");
+
+            Console.WriteLine($"Last Run = {lastRunDate.ToString("MM/dd/yyyy HH:mm:ss")}");
+
+            //bool storageOverwrite = true;
+            bool storageOverwrite = false;
+            string ext;
+            int index = 0;
+            string newName = "";
+            foreach (string filePath in Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories))
+            {
+                fi = new FileInfo(filePath);
+                //if (fi.LastWriteTime < lastRunDate)
+                if (fi.CreationTime < lastRunDate)
+                {
+                    continue;
+                }
+
+                // Skip files in this directory
+                if (fi.FullName.Contains(".picasaoriginals") || fi.Name.Equals("desktop.ini"))
+                {
+                    continue;
+                }
+
+                index++;
+
+                ext = fi.Extension.ToLower();
+                if (!ext.Equals(".jpeg") && !ext.Equals(".jpg") && !ext.Equals(".png") && !ext.Equals(".gif"))
+                {
+                    Console.WriteLine($"{index}, {fi.Name}  *** SKIPPING FILE *** ");
+                    continue;
+                }
+
+                newName = fi.Name;
+                // Get the category and menu from the file path
+                var dirParts = fi.FullName.Substring(rootPath.Length + 1).Replace(@"\", @"/").Split('/');
+                category = dirParts[0];
+                menu = "";
+                if (!category.Equals("Misc"))
+                {
+                    menu = dirParts[1];
+                    if (category.Equals("Christmas"))
+                    {
+                        newName = menu + "-12-15 " + fi.Name;
+                    }
+                    if (category.Equals("Easter"))
+                    {
+                        newName = menu + "-04-01 " + fi.Name;
+                    }
+                    if (category.Equals("Halloween"))
+                    {
+                        newName = menu + "-10-31 " + fi.Name;
+                    }
+                    if (category.Equals("Meetings"))
+                    {
+                        newName = menu + "-09-25 " + fi.Name;
+                    }
+                    if (category.Equals("Projects"))
+                    {
+                        newName = menu + "-07-04 " + fi.Name;
+                    }
+
+                    takenDT = GetDateTime(fi, newName);
+                }
+                else
+                {
+                    // Set a few fields in the image metadata, and get a good taken datetime
+                    takenDT = setPhotoMetadata(fi);
+                    if (takenDT.Year == 1)
+                    {
+                        takenDT = defaultDate;
+                    }
+                }
+
+                /*
+                category = "Governing Docs";
+                if (mediaTypeId == 4)
+                {
+                    if (dirParts.Length > 0) {
+                        if (dirParts[0].Contains("Governing docs"))
+                        {
+                            category = "Governing Docs";
+                            // 28, 1977-08 GRHA Amendment 77-443C03.pdf, Historical Docs
+                        }
+                        if (dirParts[0].Contains("GRHA historical docs"))
+                        {
+                            category = "Historical Docs";
+                            // 28, 1977-08 GRHA Amendment 77-443C03.pdf, Historical Docs
+                        }
+                        if (dirParts[0].Contains("Quail Call (newsletter)"))
+                        {
+                            category = "Quail Call newsletters";
+                            // 213, 2019-12-GRHA-QuailCall.pdf, Quail Call newsletters
+                        }
+                        if (dirParts[0].Contains("Annual Meetings"))
+                        {
+                            category = "Annual Meetings";
+                            // 25, 2024 Meeting Presentation.pdf, Annual Meetings
+                            // assume september 09
+                        }
+
+                    }
+                }
+                */
+
+                Console.WriteLine($"{index}, {newName}, taken = {takenDT}, {category}, {menu} ");
+
+                // Load the image, create resized images and upload to the blob storage containers
+                using SixLabors.ImageSharp.Image image = SixLabors.ImageSharp.Image.Load(fi.FullName);
+                //await UploadImgToStorageAsync(photosContainer, newName, image, 2000, storageOverwrite);
+                //await UploadImgToStorageAsync(thumbsContainer, newName, image, 110, storageOverwrite);
+
+                // Create a metadata object from the media file information
+                MediaInfoDoc mediaInfoDoc = new MediaInfoDoc
+                {
+                    id = Guid.NewGuid().ToString(),
+                    MediaTypeId = mediaTypeId,
+                    Name = newName,
+                    MediaDateTime = takenDT,
+                    MediaDateTimeVal = int.Parse(takenDT.ToString("yyyyMMddHH")),
+                    CategoryTags = category,
+                    MenuTags = menu,
+                    AlbumTags = "",
+                    Title = "",
+                    Description = "",
+                    People = "",
+                    ToBeProcessed = false,
+                    SearchStr = fi.Name.ToLower()
+                };
+
+                if (mediaInfoDoc.CategoryTags.Length == 0 && mediaInfoDoc.MenuTags.Length == 0)
+                {
+                    mediaInfoDoc.ToBeProcessed = true;
+                }
+
+                //Console.WriteLine(mediaInfo);
+                try
+                {
+                    await container.CreateItemAsync<MediaInfoDoc>(mediaInfoDoc, new PartitionKey(mediaInfoDoc.MediaTypeId));
+                }
+                catch (CosmosException cex) when (cex.StatusCode == HttpStatusCode.Conflict)
+                {
+                    // Ignore duplicate error, just continue on
+                }
+                catch (Exception ex)
+                {
+                    // Log any other exceptions and stop
+                    Console.WriteLine(ex.Message);
+                    throw;
+                }
+
+            } // File loop
+
+            if (index == 0)
+            {
+                Console.WriteLine("No new files found");
+            }
+
+            Console.WriteLine("");
+        }
 
         public async Task PurgeMetricsAsync()
         {
@@ -484,6 +796,10 @@ namespace MediaGalleryConsole
             database = cosmosClient.GetDatabase(databaseId);
             container = cosmosClient.GetContainer(databaseId, containerId);
             var musicContainer = new BlobContainerClient(jjkwebStorageConnStr, "music");
+            var blobHttpHeaders = new BlobHttpHeaders
+            {
+                ContentType = "audio/mpeg"
+            };
 
             Console.WriteLine($"Last Run = {lastRunDate.ToString("MM/dd/yyyy HH:mm:ss")}");
 
@@ -537,6 +853,7 @@ namespace MediaGalleryConsole
                 {
                     //blobClient.Upload(memoryStream, storageOverwrite);
                     blobClient.Upload(fi.FullName);
+                    await blobClient.SetHttpHeadersAsync(blobHttpHeaders);
                 }
 
                 // Query the container and get the ID if the Name already exists
@@ -610,19 +927,22 @@ namespace MediaGalleryConsole
         } // public async Task ProcessMusicAsync()
 
 
-
-
-        private Task UploadImgToStorageAsync(BlobContainerClient containerClient, FileInfo fi, SixLabors.ImageSharp.Image image, int desiredImgSize, bool storageOverwrite)
+        //private async Task UploadImgToStorageAsync(BlobContainerClient containerClient, string newName, SixLabors.ImageSharp.Image image, int desiredImgSize, bool storageOverwrite)
+        private async Task UploadImgToStorageAsync(BlobContainerClient containerClient, FileInfo fi, SixLabors.ImageSharp.Image image, int desiredImgSize, bool storageOverwrite)
         {
+            // Create a client with the URI and the name
             var blobClient = containerClient.GetBlobClient(fi.Name);
+            //var blobClient = containerClient.GetBlobClient(newName);
+
+            // Makes a call to Azure to see if this URI+name exists
             if (blobClient.Exists() && !storageOverwrite)
             {
-                return Task.CompletedTask;
+                return;
             }
 
             if (image is null)
             {
-                return Task.CompletedTask;
+                return;
             }
 
 
@@ -662,11 +982,27 @@ namespace MediaGalleryConsole
             MemoryStream memoryStream = new MemoryStream();
             image.Save(memoryStream, image.Metadata.DecodedImageFormat);
             memoryStream.Position = 0;
-            blobClient.Upload(memoryStream, storageOverwrite);
-            return Task.CompletedTask;
-        }
 
-        // </UploadImgToStorageAsync>
+            var blobHttpHeaders = new BlobHttpHeaders
+            {
+                ContentType = "image/jpeg"
+            };
+
+            string ext = fi.Extension.ToLower();
+            if (ext.Equals(".png"))
+            {
+                blobHttpHeaders.ContentType = "image/png";
+            }
+            else if (ext.Equals(".gif"))
+            {
+                blobHttpHeaders.ContentType = "image/gif";
+            }
+
+            blobClient.Upload(memoryStream, storageOverwrite);
+            await blobClient.SetHttpHeadersAsync(blobHttpHeaders);
+            
+            return;
+        } // </UploadImgToStorageAsync>
 
         private static void loadDatePatterns()
         {
@@ -850,7 +1186,8 @@ namespace MediaGalleryConsole
                     //if (DateTime.TryParseExact(dateStr, dateFormat, null, System.Globalization.DateTimeStyles.None, out outDateTime))
                     // Modified to assume that the datetime in the filename format (from iPhone iOS) is a UTC datetime - this will make sure the datetime gets
                     // converted to local datetime for an accurate datetime of when the photo was taken
-                    if (DateTime.TryParseExact(dateStr, dateFormat, null, System.Globalization.DateTimeStyles.AssumeUniversal, out outDateTime))
+                    if (DateTime.TryParseExact(dateStr, dateFormat, null, System.Globalization.DateTimeStyles.None, out outDateTime))
+                    //if (DateTime.TryParseExact(dateStr, dateFormat, null, System.Globalization.DateTimeStyles.AssumeUniversal, out outDateTime))
                     {
                         //log($"{fileName}, date: {dateStr}, format: {dateFormat}, DateTime: {outDateTime}");
                     }
@@ -884,6 +1221,7 @@ namespace MediaGalleryConsole
 
                 // Try to get the Date+Time taken from the filename (this will be the majority case from the iPhone iOS backup)
                 taken = getDateFromFilename(fi.FullName);
+                //taken = getDateFromFilename(fi.Name);
 
                 // Good philosophy to use the internal exif datetime if there - that gives the best taken datetime (as opposed to the file datetime)
 
@@ -945,6 +1283,25 @@ namespace MediaGalleryConsole
             return taken;
         }
 
+        private DateTime GetDateTime(FileInfo fi, string newName)
+        {
+            DateTime taken = DateTime.Parse("01/01/1800");
+            // Try to get the Date+Time taken from the filename (this will be the majority case from the iPhone iOS backup)
+            //taken = getDateFromFilename(fi.FullName);
+            taken = getDateFromFilename(newName);
+            // If greater than create date, just use create date
+            if (taken.CompareTo(fi.CreationTime) > 0)
+            {
+                taken = fi.CreationTime;
+            }
+
+            if (taken.ToString("yyyy").Equals("0000"))
+            {
+                taken = DateTime.Parse("01/01/1800");
+            }
+
+            return taken;
+        }
 
     } //   class Program
 } // namespace MediaGalleryConsole
